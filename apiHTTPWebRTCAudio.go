@@ -1,200 +1,121 @@
 package main
 
 import (
-	"bufio"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
-	"os"
-	"strings"
+	"math"
+	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
-type udpConn struct {
-	conn        *net.UDPConn
-	port        int
-	payloadType uint8
-}
+func handleWebRTCStream(c *gin.Context) {
+	// get sdp offer from json request
+	bytedata, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		log.Fatalf("Failed to read request body: %v", err)
+	}
+	reqBodyString := string(bytedata)
+	offer := webrtc.SessionDescription{}
+	decode(reqBodyString, &offer)
+	fmt.Println("Received SDP Offer:", offer)
 
-func StreamWebRTCAudio(c *gin.Context) {
-	// Create a new RTCPeerConnection
+	// Configure PeerConnection with Google's public STUN servers
 	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
+				URLs: []string{
+					"stun:stun.l.google.com:19302", // Primary Google STUN server
+					"stun:stun1.l.google.com:19302",
+					"stun:stun2.l.google.com:19302",
+				},
 			},
 		},
 	})
 	if err != nil {
-		panic(err)
+		log.Fatalf("Failed to create PeerConnection: %v", err)
 	}
-	defer func() {
-		if cErr := peerConnection.Close(); cErr != nil {
-			fmt.Printf("cannot close peerConnection: %v\n", cErr)
+
+	// Create a audio track
+	audioTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "pion")
+	if err != nil {
+		log.Fatal("Failed to create audio track:", err)
+	}
+
+	rtpSender, audioTrackErr := peerConnection.AddTrack(audioTrack)
+	if audioTrackErr != nil {
+		panic(audioTrackErr)
+	}
+
+	// Read incoming RTCP packets
+	// Before these packets are returned they are processed by interceptors. For things
+	// like NACK this needs to be called.
+	go func() {
+		rtcpBuf := make([]byte, 1500)
+		for {
+			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+				return
+			}
 		}
 	}()
 
-	// Allow us to receive 1 audio track, and 1 video track
-	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio); err != nil {
-		panic(err)
-	} else if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo); err != nil {
-		panic(err)
-	}
+	// Start generating tone
+	go generateTone(audioTrack)
 
-	// Create a local addr
-	var laddr *net.UDPAddr
-	if laddr, err = net.ResolveUDPAddr("udp", "127.0.0.1:"); err != nil {
-		panic(err)
-	}
-
-	// Prepare udp conns
-	// Also update incoming packets with expected PayloadType, the browser may use
-	// a different value. We have to modify so our stream matches what rtp-forwarder.sdp expects
-	udpConns := map[string]*udpConn{
-		"audio": {port: 4000, payloadType: 111},
-		"video": {port: 4002, payloadType: 96},
-	}
-	for _, c := range udpConns {
-		// Create remote addr
-		var raddr *net.UDPAddr
-		if raddr, err = net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", c.port)); err != nil {
-			panic(err)
-		}
-
-		// Dial udp
-		if c.conn, err = net.DialUDP("udp", laddr, raddr); err != nil {
-			panic(err)
-		}
-		defer func(conn net.PacketConn) {
-			if closeErr := conn.Close(); closeErr != nil {
-				panic(closeErr)
-			}
-		}(c.conn)
-	}
-
+	// Handle incoming audio from client
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
-		// Retrieve udp connection
-		c, ok := udpConns[track.Kind().String()]
-		if !ok {
-			return
-		}
-
-		b := make([]byte, 1500)
-		rtpPacket := &rtp.Packet{}
-		for {
-			// Read
-			n, _, readErr := track.Read(b)
-			if readErr != nil {
-				panic(readErr)
-			}
-
-			// Unmarshal the packet and update the PayloadType
-			if err = rtpPacket.Unmarshal(b[:n]); err != nil {
-				panic(err)
-			}
-			rtpPacket.PayloadType = c.payloadType
-
-			// Marshal into original buffer with updated PayloadType
-			if n, err = rtpPacket.MarshalTo(b); err != nil {
-				panic(err)
-			}
-
-			// Write
-			if _, writeErr := c.conn.Write(b[:n]); writeErr != nil {
-				// For this particular example, third party applications usually timeout after a short
-				// amount of time during which the user doesn't have enough time to provide the answer
-				// to the browser.
-				// That's why, for this particular example, the user first needs to provide the answer
-				// to the browser then open the third party application. Therefore we must not kill
-				// the forward on "connection refused" errors
-				var opError *net.OpError
-				if errors.As(writeErr, &opError) && opError.Err.Error() == "write: connection refused" {
-					continue
-				}
-				panic(err)
-			}
-		}
+		log.Printf("Received track: Codec=%s\n", track.Codec().MimeType)
 	})
 
-	// Set the handler for ICE connection state
-	// This will notify you when the peer has connected/disconnected
-	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Printf("Connection State has changed %s \n", connectionState.String())
-
-		if connectionState == webrtc.ICEConnectionStateConnected {
-			fmt.Println("Ctrl+C the remote client to stop the demo")
-		}
-	})
-
-	// Set the handler for Peer connection state
-	// This will notify you when the peer has connected/disconnected
-	peerConnection.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
-		log.Printf("Peer Connection State has changed: %s\n", s.String())
-
-		if s == webrtc.PeerConnectionStateFailed {
-			// Wait until PeerConnection has had no network activity for 30 seconds or another failure. It may be reconnected using an ICE Restart.
-			// Use webrtc.PeerConnectionStateDisconnected if you are interested in detecting faster timeout.
-			// Note that the PeerConnection may come back from PeerConnectionStateDisconnected.
-			log.Println("Done forwarding")
-			os.Exit(0)
-		}
-
-		if s == webrtc.PeerConnectionStateClosed {
-			// PeerConnection was explicitly closed. This usually happens from a DTLS CloseNotify
-			log.Println("Done forwarding")
-			os.Exit(0)
-		}
-	})
-
-	// Wait for the offer to be pasted
-	offer := webrtc.SessionDescription{}
-	decode(readUntilNewline(), &offer)
-
-	// Set the remote SessionDescription
+	// Take offer from remote, PeerConnection is now able to contact the other PeerConnection
 	if err = peerConnection.SetRemoteDescription(offer); err != nil {
 		panic(err)
 	}
 
-	// Create answer
+	// Create an Answer to send back to our originating PeerConnection
 	answer, err := peerConnection.CreateAnswer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	// Create channel that is blocked until ICE Gathering is complete
-	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
-
-	// Sets the LocalDescription, and starts our UDP listeners
+	// SetRemoteDescription on original PeerConnection, this finishes our signaling
+	// bother PeerConnections should be able to communicate with each other now
 	if err = peerConnection.SetLocalDescription(answer); err != nil {
 		panic(err)
 	}
 
-	// Block until ICE Gathering is complete, disabling trickle ICE
-	// we do this because we only can exchange one signaling message
-	// in a production application you should exchange ICE Candidates via OnICECandidate
-	<-gatherComplete
+	// Wait until all ICE candidates have been gathered
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	// Output the answer in base64 so we can paste it in browser
-	fmt.Println(encode(peerConnection.LocalDescription()))
+	peerConnection.OnICEGatheringStateChange(func(state webrtc.ICEGathererState) {
+		fmt.Println("ICE Gathering State: %s\n", state.String())
+		if state == webrtc.ICEGathererStateComplete {
+			fmt.Println("ICE gathering complete.")
+			wg.Done() // Signal that ICE gathering is complete
+		}
+	})
 
-	// Block forever
-	select {}
-}
+	// Wait for ICE candidates to gather before responding
+	wg.Wait()
+	// Log the final SDP
+	fmt.Print("Sending answer with gathered ICE candidates")
 
-// JSON encode + base64 a SessionDescription
-func encode(obj *webrtc.SessionDescription) string {
-	b, err := json.Marshal(obj)
-	if err != nil {
-		panic(err)
-	}
+	// Respond to client with the SDP answer
+	c.JSON(http.StatusOK, answer)
 
-	return base64.StdEncoding.EncodeToString(b)
+	// Handle further processing asynchronously
+	go func() {
+		// Processing logic here
+		select {} // Keep the peer connection open
+	}()
+
 }
 
 // Decode a base64 and unmarshal JSON into a SessionDescription
@@ -204,27 +125,35 @@ func decode(in string, obj *webrtc.SessionDescription) {
 		panic(err)
 	}
 
-	if err = json.Unmarshal(b, obj); err != nil {
+	err = json.Unmarshal(b, obj)
+	if err != nil {
 		panic(err)
 	}
 }
 
-// Read from stdin until we get a newline
-func readUntilNewline() (in string) {
-	var err error
+func generateTone(track *webrtc.TrackLocalStaticSample) {
+	const sampleRate = 48000 // Audio sample rate
+	const frequency = 440    // Frequency of the tone in Hz
+	const durationMs = 20    // Duration per RTP packet in milliseconds
 
-	r := bufio.NewReader(os.Stdin)
-	for {
-		in, err = r.ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			panic(err)
-		}
+	// Prepare a buffer for samples
+	samples := make([]byte, sampleRate*durationMs/1000*2) // PCM buffer: stereo 16-bit (2 bytes per sample)
 
-		if in = strings.TrimSpace(in); len(in) > 0 {
-			break
-		}
+	// Generate a sine wave
+	for i := range samples {
+		sineValue := int16(10000 * math.Sin(2*math.Pi*frequency*float64(i)/float64(sampleRate)))
+		samples[i*2] = byte(sineValue & 0xFF)          // Low byte
+		samples[i*2+1] = byte((sineValue >> 8) & 0xFF) // High byte
 	}
 
-	fmt.Println("")
-	return
+	// Stream samples in continuous packets
+	ticker := time.NewTicker(time.Millisecond * durationMs)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		err := track.WriteSample(media.Sample{Data: samples, Duration: 20 * time.Millisecond})
+		if err != nil {
+			log.Printf("Failed to send sample: %v", err)
+		}
+	}
 }

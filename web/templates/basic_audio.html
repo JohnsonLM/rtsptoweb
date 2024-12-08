@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RTSPtoWeb WebRTC Audio example</title>
+  </head>
+  <body>
+    <h1>RTSPtoWeb WebRTC Audio example</h1>
+    <audio controls id="webrtc-audio-1" autoplay></audio>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        function startAudioPlay(audioElement, url) {
+          // create new connection
+          console.log("Starting connection")
+          const peerConnection = new RTCPeerConnection({
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:19302" },
+                { urls: "stun:stun2.l.google.com:19302" },
+            ],
+            sdpSemantics: "unified-plan",
+          });
+
+          // add mic stream 
+          navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(stream => {
+            stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
+            console.log("added streams to call")
+          })
+          .catch(error => {
+            // Handle errors
+          });
+          
+          // Handle received audio tracks
+          peerConnection.ontrack = function (event) {
+            console.log("Received track:", event.track);
+            audioElement.srcObject = event.streams[0]; // Use the first stream
+          };
+
+          // Log ICE connection state
+          peerConnection.oniceconnectionstatechange = () => {
+            console.log('ICE Connection State:', peerConnection.iceConnectionState);
+          };
+
+          // Signaling logic: Offer negotiation with the server
+          peerConnection.onnegotiationneeded = async function handleNegotiationNeeded() {
+            try {
+              console.log("Creating offer")
+              const offer = await peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: false,
+              });
+              await peerConnection.setLocalDescription(offer);
+              console.log("Client SDP Offer:", peerConnection.localDescription.sdp);
+              const offerJSON = JSON.stringify(peerConnection.localDescription);
+
+              const response = await fetch(url, {
+                method: "POST",
+                headers: {
+                  "content-type": "application/json",
+                  "cache-control": "no-cache",
+                },
+                body: btoa(offerJSON),
+              });
+
+              const answerJSON = await response.text();
+              console.log("Received answer from server:", answerJSON);
+              const remoteDesc = new RTCSessionDescription(JSON.parse(answerJSON));
+              await peerConnection.setRemoteDescription(remoteDesc);
+
+
+              console.log("Remote description successfully set.");
+            } catch (error) {
+              console.error("Failed during negotiation: ", error);
+            }
+          };
+        }
+
+        startAudioPlay(document.querySelector("#webrtc-audio-1"), "http://localhost:8083/audio/webrtc/");
+      });
+    </script>
+  </body>
+</html>
+

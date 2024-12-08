@@ -3,12 +3,9 @@ package main
 import (
 	"time"
 
-	"github.com/deepch/vdk/av"
 	webrtc "github.com/deepch/vdk/format/webrtcv3"
 	"github.com/gin-gonic/gin"
-	"github.com/gordonklaus/portaudio"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/hraban/opus.v2"
 )
 
 // HTTPAPIServerStreamWebRTC stream video over WebRTC
@@ -99,69 +96,4 @@ func HTTPAPIServerStreamWebRTC(c *gin.Context) {
 			}
 		}
 	}()
-}
-
-// HTTPAPIServerStreamWebRTC stream audio over WebRTC
-func HTTPAPIServerStreamWebRTCAudio(c *gin.Context) {
-	const sampleRate = 48000 // audio sample rate
-	const channels = 1       // mono; 2 for stereo
-	const bufferSize = 1000
-	pcm := make([]int16, 240)
-	frameSize := len(pcm)
-	frameSizeMs := float32(frameSize) / channels * 1000 / sampleRate
-	log.Errorf("frame size: %d bytes (%f ms)", frameSize, frameSizeMs)
-
-	if err := portaudio.Initialize(); err != nil {
-		log.Fatalf("Failed to initialize PortAudio: %s", err)
-	}
-	defer portaudio.Terminate()
-
-	stream, err := portaudio.OpenDefaultStream(1, 0, sampleRate, frameSize, pcm)
-	if err != nil {
-		log.Fatalf("Failed to open default stream: %s", err)
-	}
-	defer stream.Close()
-
-	// Start the audio stream
-	if err := stream.Start(); err != nil {
-		log.Fatalf("Failed to start stream: %s", err)
-	}
-	defer stream.Stop()
-
-	muxer := webrtc.NewMuxer(webrtc.Options{ICEServers: Storage.ServerICEServers(), ICEUsername: Storage.ServerICEUsername(), ICECredential: Storage.ServerICECredential(), PortMin: Storage.ServerWebRTCPortMin(), PortMax: Storage.ServerWebRTCPortMax()})
-
-	log.Println("Audio track added to muxer")
-
-	answer, err := muxer.WriteHeader(nil, c.PostForm("data"))
-	_, err = c.Writer.Write([]byte(answer))
-
-	for {
-		// Create Opus encoder
-		enc, err := opus.NewEncoder(sampleRate, channels, opus.AppVoIP)
-		if err != nil {
-			log.Fatalf("Failed to create Opus encoder: %s", err)
-		}
-
-		// Encode to Opus
-		packet := make([]byte, bufferSize)
-		n, err := enc.Encode(pcm, packet)
-		if err != nil {
-			log.Printf("Error encoding PCM to Opus: %s", err)
-			return
-		}
-		avPacket := &av.Packet{
-			IsKeyFrame: false,
-			Idx:        1,
-			Data:       packet[:n],
-		}
-
-		muxer.WritePacket(*avPacket)
-		return
-	}
-}
-
-func chk(err error) {
-	if err != nil {
-		panic(err)
-	}
 }

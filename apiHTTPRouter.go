@@ -74,7 +74,7 @@ func HTTPAPIServer() {
 		Stream video elements
 	*/
 	public.POST("/stream/:uuid/channel/:channel/webrtc", HTTPAPIServerStreamWebRTC)
-	public.POST("/audio/webrtc", StreamWebRTCAudio)
+	public.POST("/audio/webrtc", handleWebRTCStream)
 
 	if Storage.ServerHTTPS() {
 		if Storage.ServerHTTPSAutoTLSEnable() {
@@ -182,7 +182,7 @@ func HTTPAPIPlayBasic(c *gin.Context) {
 }
 
 func HTTPAPIPlayAudioBasic(c *gin.Context) {
-	c.HTML(http.StatusOK, "basic_audio.tmpl", gin.H{
+	c.HTML(http.StatusOK, "basic_audio.html", gin.H{
 		"port":    Storage.ServerHTTPPort(),
 		"streams": Storage.Streams,
 		"version": time.Now().String(),
