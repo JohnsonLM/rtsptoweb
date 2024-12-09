@@ -6,7 +6,7 @@
   </head>
   <body>
     <h1>RTSPtoWeb WebRTC Audio example</h1>
-    <audio controls id="webrtc-audio-1" autoplay></audio>
+    <audio controls id="audio_track" autoplay></audio>
     <script>
       document.addEventListener("DOMContentLoaded", function () {
         function startAudioPlay(audioElement, url) {
@@ -35,6 +35,12 @@
           peerConnection.ontrack = function (event) {
             console.log("Received track:", event.track);
             audioElement.srcObject = event.streams[0]; // Use the first stream
+            audioElement.onloadedmetadata = () => {
+                    console.log("Audio metadata loaded, attempting to play...");
+                    audioElement.play()
+                        .then(() => console.log("Remote audio playback started"))
+                        .catch(e => console.error("Error playing remote audio:", e));
+                };
           };
 
           // Log ICE connection state
@@ -43,40 +49,44 @@
           };
 
           // Signaling logic: Offer negotiation with the server
-          peerConnection.onnegotiationneeded = async function handleNegotiationNeeded() {
-            try {
+          peerConnection.onnegotiationneeded = function handleNegotiationNeeded() {
               console.log("Creating offer")
-              const offer = await peerConnection.createOffer({
-                offerToReceiveAudio: true,
-                offerToReceiveVideo: false,
+              peerConnection.createOffer().then((offer) => {
+                return peerConnection.setLocalDescription(offer);
+              }).then(() => {
+                return new Promise(resolve => {
+                    // add event listener on ice gathering state only if it's not complete.
+                    if (peerConnection.iceConnectionState === 'complete') {
+                        resolve();
+                    } else {
+                        let waitComplete = () => {
+                            if (peerConnection.iceGatheringState === 'complete') {
+                              peerConnection.removeEventListener('icegatheringstatechange', waitComplete);
+                                resolve();
+                            }
+                        }
+                        peerConnection.addEventListener('icegatheringstatechange', waitComplete);
+                    }
+                });
+              }).then(() => {
+                const offerJSON = JSON.stringify(peerConnection.localDescription);
+                return fetch(url, {
+                  method: "POST",
+                  headers: {"content-type": "application/json",},
+                  body: btoa(offerJSON),
+                });
+              }).then(response => {
+                return response.text(); // this is a Promise
+              }).then(answer => {
+                const remoteDesc = new RTCSessionDescription(JSON.parse(answer));
+                return peerConnection.setRemoteDescription(remoteDesc);
+              }).catch(error => {
+                console.error("Error in negociation", error);
               });
-              await peerConnection.setLocalDescription(offer);
-              console.log("Client SDP Offer:", peerConnection.localDescription.sdp);
-              const offerJSON = JSON.stringify(peerConnection.localDescription);
-
-              const response = await fetch(url, {
-                method: "POST",
-                headers: {
-                  "content-type": "application/json",
-                  "cache-control": "no-cache",
-                },
-                body: btoa(offerJSON),
-              });
-
-              const answerJSON = await response.text();
-              console.log("Received answer from server:", answerJSON);
-              const remoteDesc = new RTCSessionDescription(JSON.parse(answerJSON));
-              await peerConnection.setRemoteDescription(remoteDesc);
-
-
-              console.log("Remote description successfully set.");
-            } catch (error) {
-              console.error("Failed during negotiation: ", error);
-            }
           };
         }
 
-        startAudioPlay(document.querySelector("#webrtc-audio-1"), "http://localhost:8083/audio/webrtc/");
+        startAudioPlay(document.querySelector("#audio_track"), "http://localhost:8083/audio/webrtc");
       });
     </script>
   </body>
