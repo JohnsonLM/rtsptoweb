@@ -3,19 +3,35 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/hajimehoshi/oto"
+	"github.com/gordonklaus/portaudio"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"gopkg.in/hraban/opus.v2"
 )
 
+var (
+	decoder *opus.Decoder
+	err     error
+)
+
+const (
+	sampleRate      = 48000
+	inputChannels   = 2
+	outputChannels  = 0
+	framesPerBuffer = 960 // 20ms at 48kHz per channel
+)
+
+// function to handle WebRTC audio stream
 func handleWebRTCStream(c *gin.Context) {
 	// get sdp offer from json request
 	bytedata, err := io.ReadAll(c.Request.Body)
@@ -47,7 +63,69 @@ func handleWebRTCStream(c *gin.Context) {
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		log.Println("Track acquired", track.Kind(), track.Codec())
 		if track.Kind() == webrtc.RTPCodecTypeAudio {
-			go playOpusAudio(track)
+			codec := track.Codec()
+			if strings.EqualFold(codec.MimeType, webrtc.MimeTypeOpus) {
+				fmt.Println("Got Opus track, playing...")
+
+				// Initialize PortAudio
+				portaudio.Initialize()
+				defer portaudio.Terminate()
+
+				// Initialize the Opus decoder
+				decoder, err = opus.NewDecoder(sampleRate, inputChannels) // 48000 Hz sample rate, 2 channel (stereo)
+				if err != nil {
+					log.Fatalf("failed to create Opus decoder: %v", err)
+				}
+
+				// Create a buffer to hold audio data
+				buffer := make([]int16, framesPerBuffer*inputChannels)
+
+				// Create a stream for audio playback
+				stream, err := portaudio.OpenDefaultStream(outputChannels, inputChannels, sampleRate, len(buffer), &buffer)
+				if err != nil {
+					log.Fatal(err)
+				}
+				defer stream.Close()
+
+				// Start the stream
+				if err := stream.Start(); err != nil {
+					log.Fatal(err)
+				}
+				defer stream.Stop()
+
+				// WaitGroup to wait for the audio to finish playing
+				var wg_audio sync.WaitGroup
+				wg_audio.Add(1)
+
+				defer wg_audio.Done()
+				for {
+					// Read RTP packets from the track
+					packet, _, err := track.ReadRTP()
+					if err != nil {
+						log.Println(err)
+						break
+					}
+
+					// Convert RTP packet to audio data and append to buffer
+					audioData := convertRTPPacketToAudioData(packet)
+					copy(buffer, audioData)
+					//buffer = append(buffer, audioData...)
+
+					// Write buffer to stream
+					if err := stream.Write(); err != nil {
+						log.Println(err)
+						break
+					}
+				}
+
+				// Wait for the audio to finish playing
+				wg_audio.Wait()
+
+				// Stop the stream
+				if err := stream.Stop(); err != nil {
+					log.Fatal(err)
+				}
+			}
 		}
 	})
 
@@ -124,7 +202,6 @@ func handleWebRTCStream(c *gin.Context) {
 		// Processing logic here
 		select {} // Keep the peer connection open
 	}()
-
 }
 
 // Decode a base64 and unmarshal JSON into a SessionDescription
@@ -140,6 +217,7 @@ func decode(in string, obj *webrtc.SessionDescription) {
 	}
 }
 
+// function to generate tone
 func generateTone(track *webrtc.TrackLocalStaticSample) {
 	log.Info("Starting tone generation...")
 
@@ -176,66 +254,14 @@ func generateTone(track *webrtc.TrackLocalStaticSample) {
 	}
 }
 
-func playOpusAudio(track *webrtc.TrackRemote) {
-	const (
-		sampleRate     = 48000
-		channelCount   = 2
-		bytesPerSample = 2
-		bufferSize     = 1024
-	)
-
-	context, err := oto.NewContext(sampleRate, channelCount, bytesPerSample, bufferSize)
+// function to convert RTP packet to audio data
+func convertRTPPacketToAudioData(packet *rtp.Packet) []int16 {
+	// Decode the Opus packet to PCM
+	pcm := make([]int16, framesPerBuffer*inputChannels)
+	n, err := decoder.Decode(packet.Payload, pcm)
 	if err != nil {
-		log.Println("Failed to initialize audio playback context:", err)
-		return
+		log.Printf("failed to decode Opus packet: %v", err)
+		return nil
 	}
-	defer context.Close()
-
-	player := context.NewPlayer()
-	defer player.Close()
-
-	decoder, err := opus.NewDecoder(sampleRate, channelCount)
-	if err != nil {
-		log.Println("Failed to initialize Opus decoder:", err)
-		return
-	}
-
-	audioBuffer := make([]byte, bufferSize)                     // Opus payload buffer
-	pcmSamplesPerFrame := 960                                   // PCM samples per 20ms at 48 kHz for stereo audio
-	pcmBuffer := make([]int16, pcmSamplesPerFrame*channelCount) // 960 * 2 (Stereo = 2 channels)
-
-	for {
-		// Read Opus packets
-		n, _, readErr := track.Read(audioBuffer)
-		if readErr != nil {
-			log.Println("Error reading track data:", readErr)
-			break
-		}
-
-		// Decode Opus payload into PCM data
-		numSamples, decodeErr := decoder.Decode(audioBuffer[:n], pcmBuffer)
-		if decodeErr != nil {
-			log.Println("Decoder error:", decodeErr)
-			continue
-		}
-
-		// Convert PCM to bytes
-		pcmBytes := int16ToBytes(pcmBuffer[:numSamples*channelCount])
-
-		// Write PCM to the player
-		_, writeErr := player.Write(pcmBytes)
-		if writeErr != nil {
-			log.Println("Error writing audio to player:", writeErr)
-			break
-		}
-	}
-}
-
-func int16ToBytes(samples []int16) []byte {
-	bytes := make([]byte, len(samples)*2) // Each int16 sample has 2 bytes
-	for i, sample := range samples {
-		bytes[2*i] = byte(sample & 0xFF)          // LSB
-		bytes[2*i+1] = byte((sample >> 8) & 0xFF) // MSB
-	}
-	return bytes
+	return pcm[:n*inputChannels]
 }

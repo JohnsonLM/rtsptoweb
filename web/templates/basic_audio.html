@@ -7,6 +7,23 @@
   <body>
     <h1>RTSPtoWeb WebRTC Audio example</h1>
     <audio controls id="audio_track" autoplay></audio>
+    <video
+    width="800px"
+    id="webrtc-video-1"
+    autoplay
+    muted
+    playsinline
+    style="max-width: 100%; max-height: 100%"
+  ></video>
+  <video
+    width="800px"
+    id="webrtc-video-2"
+    autoplay
+    muted
+    playsinline
+    style="max-width: 100%; max-height: 100%"
+  ></video>
+
     <script>
       document.addEventListener("DOMContentLoaded", function () {
         function startAudioPlay(audioElement, url) {
@@ -87,6 +104,142 @@
         }
 
         startAudioPlay(document.querySelector("#audio_track"), "http://localhost:8083/audio/webrtc");
+      });
+    </script>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        function startPlay(videoEl, url) {
+          const webrtc = new RTCPeerConnection({
+            iceServers: [
+              {
+                urls: ["stun:stun.l.google.com:19302"],
+              },
+            ],
+            sdpSemantics: "unified-plan",
+          });
+
+          webrtc.ontrack = function (event) {
+            console.log(event.streams.length + " track is delivered");
+            videoEl.srcObject = event.streams[0];
+            videoEl.play();
+          };
+
+          webrtc.addTransceiver("video", { direction: "sendrecv" });
+
+          webrtc.onnegotiationneeded =
+            async function handleNegotiationNeeded() {
+              let offer = await webrtc.createOffer();
+              await webrtc.setLocalDescription(offer);
+
+              fetch(url, {
+                method: "POST",
+                headers: {
+                  "content-type":
+                    "application/x-www-form-urlencoded; charset=UTF-8",
+                  "cache-control": "no-cache",
+                },
+                body: `data=${btoa(webrtc.localDescription.sdp)}`,
+              })
+                .then((response) => response.text())
+                .then((data) => {
+                  try {
+                    webrtc.setRemoteDescription(
+                      new RTCSessionDescription({
+                        type: "answer",
+                        sdp: atob(data),
+                      })
+                    );
+                  } catch (e) {
+                    console.warn(e);
+                  }
+                });
+            };
+
+          const webrtcSendChannel = webrtc.createDataChannel(
+            "rtsptowebSendChannel"
+          );
+
+          webrtcSendChannel.onopen = (event) => {
+            console.log(`${webrtcSendChannel.label} has opened`);
+            webrtcSendChannel.send("ping");
+          };
+
+          webrtcSendChannel.onclose = (_event) => {
+            console.log(`${webrtcSendChannel.label} has closed`);
+            startPlay(videoEl, url);
+          };
+
+          webrtcSendChannel.onmessage = (event) => console.log(event.data);
+        }
+        function startAudioPlay(videoEl, url) {
+    const webrtc = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: ["stun:stun.l.google.com:19302"],
+        },
+      ],
+      sdpSemantics: "unified-plan",
+    });
+
+    webrtc.ontrack = function (event) {
+      console.log(event.streams.length + " track is delivered");
+      videoEl.srcObject = event.streams[0];
+      videoEl.play();
+    };
+
+    webrtc.addTransceiver("audio", { direction: "sendrecv" });
+
+    webrtc.onnegotiationneeded = async function handleNegotiationNeeded() {
+      let offer = await webrtc.createOffer();
+      await webrtc.setLocalDescription(offer);
+
+      fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "cache-control": "no-cache",
+        },
+        body: `data=${btoa(webrtc.localDescription.sdp)}`,
+      })
+        .then((response) => response.text())
+        .then((data) => {
+          try {
+            webrtc.setRemoteDescription(
+              new RTCSessionDescription({ type: "answer", sdp: atob(data) })
+            );
+          } catch (e) {
+            console.warn(e);
+          }
+        });
+    };
+
+    const webrtcSendChannel = webrtc.createDataChannel("rtsptowebSendChannel");
+
+    webrtcSendChannel.onopen = (event) => {
+      console.log(`${webrtcSendChannel.label} has opened`);
+      webrtcSendChannel.send("ping");
+    };
+
+    webrtcSendChannel.onclose = (_event) => {
+      console.log(`${webrtcSendChannel.label} has closed`);
+      startAudioPlay(videoEl, url);
+    };
+
+    webrtcSendChannel.onmessage = (event) => console.log(event.data);
+  }
+
+        startAudioPlay(
+          document.querySelector("#webrtc-audio-1"),
+          "http://localhost:8083/audio/webrtc/"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-1"),
+          "http://localhost:8083/stream/demo1/channel/0/webrtc?uuid=demo1&channel=0?token=test"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-2"),
+          "http://localhost:8083/stream/c1b1d253-6ec0-4f17-80af-6025b39416cd/channel/0/webrtc?uuid=demo1&channel=0?token=test"
+        );
       });
     </script>
   </body>

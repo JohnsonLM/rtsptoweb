@@ -29,6 +29,18 @@
     "webrtc_port_min": 0
   },
   "streams": {
-
+      "demo1": {
+        "name": "test video stream 1",
+        "channels": {
+          "0": {
+            "name": "ch1",
+            "url": "rtsp://172.17.2.1:7447/TRa3m20ChvbnFzR8",
+            "on_demand": false,
+            "debug": false,
+            "audio": true,
+            "status": 0
+          }
+        }
+      }
   }
 }
