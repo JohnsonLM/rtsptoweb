@@ -451,10 +451,7 @@ func processAudioPacket(audioPayload []byte, encoder *opus.Encoder, audioTrack *
 	if len(audioBuffer) >= bufferThreshold {
 		// Write the buffered data to the audio track
 		for _, packet := range audioBuffer {
-			err = audioTrack.WriteSample(media.Sample{
-				Data: packet, 
-				Duration: time.Millisecond * 20
-			})
+			err = audioTrack.WriteSample(media.Sample{Data: packet, Duration: time.Millisecond * 20})
 			if err != nil {
 				fmt.Println("Error:", err)
 				break
