@@ -34,7 +34,15 @@
         "channels": {
           "0": {
             "name": "ch1",
-            "url": "rtsp://172.17.2.1:7447/TRa3m20ChvbnFzR8",
+            "url": "rtsp://10.1.1.1:7447/z2oPZR8vvyJjyawM",
+            "on_demand": false,
+            "debug": false,
+            "audio": true,
+            "status": 0
+          },
+          "1": {
+            "name": "ch1",
+            "url": "rtsp://10.1.1.1:7447/4YkzaM9NK6HmLrn9",
             "on_demand": false,
             "debug": false,
             "audio": true,

@@ -1,34 +1,43 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gordonklaus/portaudio"
 	"github.com/pion/rtp"
+	"github.com/pion/sdp/v2"
 	"github.com/pion/webrtc/v3"
 	"github.com/pion/webrtc/v3/pkg/media"
 	"gopkg.in/hraban/opus.v2"
 )
 
 var (
-	decoder *opus.Decoder
-	err     error
+	decoder     *opus.Decoder
+	encoder     *opus.Encoder
+	err         error
+	audioBuffer [][]byte
+	bufferMutex sync.Mutex
 )
 
 const (
-	sampleRate      = 48000
-	inputChannels   = 2
-	outputChannels  = 0
-	framesPerBuffer = 960 // 20ms at 48kHz per channel
+	sampleRate       = 48000
+	inputChannels    = 2
+	outputChannels   = 2
+	framesPerBuffer  = 960  // 20ms at 48kHz per channel
+	bufferThreshold  = 10   // Number of packets to buffer before writing to the audio track
+	desiredFrameSize = 1920 // Desired frame size in samples
 )
 
 // function to handle WebRTC audio stream
@@ -67,63 +76,73 @@ func handleWebRTCStream(c *gin.Context) {
 			if strings.EqualFold(codec.MimeType, webrtc.MimeTypeOpus) {
 				fmt.Println("Got Opus track, playing...")
 
-				// Initialize PortAudio
-				portaudio.Initialize()
-				defer portaudio.Terminate()
-
 				// Initialize the Opus decoder
 				decoder, err = opus.NewDecoder(sampleRate, inputChannels) // 48000 Hz sample rate, 2 channel (stereo)
 				if err != nil {
 					log.Fatalf("failed to create Opus decoder: %v", err)
 				}
 
-				// Create a buffer to hold audio data
-				buffer := make([]int16, framesPerBuffer*inputChannels)
-
-				// Create a stream for audio playback
-				stream, err := portaudio.OpenDefaultStream(outputChannels, inputChannels, sampleRate, len(buffer), &buffer)
+				// Create a UDP connection to the AES67 multicast group
+				conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+					IP:   net.ParseIP("239.69.10.5"), // Replace with your multicast group IP
+					Port: 5004,                       // Replace with your multicast group port
+				})
 				if err != nil {
-					log.Fatal(err)
+					log.Fatal("Failed to create UDP connection:", err)
 				}
-				defer stream.Close()
+				defer conn.Close()
 
-				// Start the stream
-				if err := stream.Start(); err != nil {
-					log.Fatal(err)
-				}
-				defer stream.Stop()
+				// Start sending SAP announcements
+				go sendSAPAnnouncements(net.ParseIP("239.69.10.5"), 5004)
 
-				// WaitGroup to wait for the audio to finish playing
-				var wg_audio sync.WaitGroup
-				wg_audio.Add(1)
-
-				defer wg_audio.Done()
+				// Read RTP packets from the track and forward them to the multicast group
+				buf := make([]byte, 1500)
 				for {
-					// Read RTP packets from the track
-					packet, _, err := track.ReadRTP()
-					if err != nil {
-						log.Println(err)
-						break
+					n, _, readErr := track.Read(buf)
+					if readErr != nil {
+						log.Error("Failed to read RTP packet:", readErr)
+						return
 					}
 
-					// Convert RTP packet to audio data and append to buffer
-					audioData := convertRTPPacketToAudioData(packet)
-					copy(buffer, audioData)
-					//buffer = append(buffer, audioData...)
-
-					// Write buffer to stream
-					if err := stream.Write(); err != nil {
-						log.Println(err)
-						break
+					packet := &rtp.Packet{}
+					if err := packet.Unmarshal(buf[:n]); err != nil {
+						log.Error("Failed to unmarshal RTP packet:", err)
+						continue
 					}
-				}
+					// Decode Opus to PCM
+					pcm := make([]int16, 1920*inputChannels) // 20ms frame at 48kHz, 2 channels
+					frameSize, decodeErr := decoder.Decode(packet.Payload, pcm)
+					if decodeErr != nil {
+						log.Error("Failed to decode Opus packet:", decodeErr)
+						continue
+					}
 
-				// Wait for the audio to finish playing
-				wg_audio.Wait()
+					// Encode PCM to L24
+					l24 := make([]byte, frameSize*3*inputChannels)
+					for i := 0; i < frameSize*inputChannels; i++ {
+						l24[i*3] = byte(pcm[i] >> 8)
+						l24[i*3+1] = byte(pcm[i] >> 16)
+						l24[i*3+2] = byte(pcm[i] >> 24)
+					}
 
-				// Stop the stream
-				if err := stream.Stop(); err != nil {
-					log.Fatal(err)
+					// Create a new RTP packet with L24 payload
+					l24Packet := &rtp.Packet{
+						Header:  packet.Header,
+						Payload: l24,
+					}
+					l24Packet.Header.PayloadType = 96 // Set payload type to 96 for L24
+
+					// Marshal the L24 RTP packet
+					l24Buf, marshalErr := l24Packet.Marshal()
+					if marshalErr != nil {
+						log.Error("Failed to marshal L24 RTP packet:", marshalErr)
+						continue
+					}
+
+					if _, writeErr := conn.Write(l24Buf); writeErr != nil {
+						log.Error("Failed to write RTP packet to multicast group:", writeErr)
+						return
+					}
 				}
 			}
 		}
@@ -156,8 +175,75 @@ func handleWebRTCStream(c *gin.Context) {
 		}
 	}()
 
-	// Start generating tone
-	go generateTone(audioTrack)
+	// Write audio data to the audio track from ES67 stream
+	go func() {
+		multicastAddr := "239.69.10.42:5004"
+
+		// Resolve the UDP address
+		addr, err := net.ResolveUDPAddr("udp", multicastAddr)
+		if err != nil {
+			fmt.Println("Error resolving address:", err)
+			os.Exit(1)
+		}
+
+		// Create the UDP connection
+		conn, err := net.ListenMulticastUDP("udp", nil, addr)
+		if err != nil {
+			fmt.Println("Error creating connection:", err)
+			os.Exit(1)
+		}
+		defer conn.Close()
+
+		// Set the read buffer size
+		err = conn.SetReadBuffer(1920)
+		if err != nil {
+			fmt.Println("Error setting read buffer:", err)
+			os.Exit(1)
+		}
+
+		// Initialize the Opus encoder
+		encoder, err := opus.NewEncoder(sampleRate, outputChannels, opus.AppVoIP) // 48000 Hz sample rate, 2 channel (stereo)
+		if err != nil {
+			log.Fatalf("failed to create Opus encoder: %v", err)
+		}
+
+		// Initialize the buffer
+		audioBuffer = make([][]byte, 0, bufferThreshold)
+
+		// Read RTP packets from the multicast group
+		for {
+			buf := make([]byte, 1024)
+			const rtpHeaderSize = 12
+			n, src, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				fmt.Println("Error reading from UDP:", err)
+				continue
+			}
+
+			// Parse the RTP header
+			if n < rtpHeaderSize {
+				fmt.Println("Packet too short to be RTP")
+				continue
+			}
+
+			// Extract RTP header fields
+			version := buf[0] >> 6
+			payloadType := buf[1] & 0x7F
+			sequenceNumber := binary.BigEndian.Uint16(buf[2:4])
+			timestamp := binary.BigEndian.Uint32(buf[4:8])
+			ssrc := binary.BigEndian.Uint32(buf[8:12])
+
+			fmt.Printf("Received RTP packet from %s\n", src)
+			fmt.Printf("Version: %d, Payload Type: %d, Sequence Number: %d, Timestamp: %d, SSRC: %d\n",
+				version, payloadType, sequenceNumber, timestamp, ssrc)
+
+			// Extract the audio payload
+			audioPayload := buf[rtpHeaderSize:n]
+
+			// Process and buffer the audio packet
+			processAudioPacket(audioPayload, encoder, audioTrack)
+		}
+	}()
 
 	// Take offer from remote, PeerConnection is now able to contact the other PeerConnection
 	if err = peerConnection.SetRemoteDescription(offer); err != nil {
@@ -217,43 +303,6 @@ func decode(in string, obj *webrtc.SessionDescription) {
 	}
 }
 
-// function to generate tone
-func generateTone(track *webrtc.TrackLocalStaticSample) {
-	log.Info("Starting tone generation...")
-
-	// Tone parameters
-	const sampleRate = 48000                    // Samples per second
-	const frequency = 440.0                     // Tone frequency (Hz)
-	const volume = 0.5                          // Amplitude (0.0 to 1.0)
-	const frameDuration = time.Millisecond * 20 // Frame duration (20ms)
-
-	// Calculate the number of samples per frame
-	samplesPerFrame := int(sampleRate * frameDuration.Seconds())
-	sampleBuffer := make([]byte, samplesPerFrame*2) // 16-bit PCM, 2 bytes per sample
-
-	// Generate a sine wave for the frame
-	for i := 0; i < samplesPerFrame; i++ {
-		sample := int16(volume * math.MaxInt16 * math.Sin(2*math.Pi*frequency*float64(i)/float64(sampleRate)))
-		sampleBuffer[i*2] = byte(sample & 0xff)          // Little-endian LSB
-		sampleBuffer[i*2+1] = byte((sample >> 8) & 0xff) // Little-endian MSB
-	}
-
-	// Continuously write frames to the track
-	ticker := time.NewTicker(frameDuration)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		err := track.WriteSample(media.Sample{
-			Data:     sampleBuffer,
-			Duration: frameDuration,
-		})
-		if err != nil {
-			log.Errorf("Error writing sample: %v", err)
-			return
-		}
-	}
-}
-
 // function to convert RTP packet to audio data
 func convertRTPPacketToAudioData(packet *rtp.Packet) []int16 {
 	// Decode the Opus packet to PCM
@@ -264,4 +313,155 @@ func convertRTPPacketToAudioData(packet *rtp.Packet) []int16 {
 		return nil
 	}
 	return pcm[:n*inputChannels]
+}
+
+func sendSAPAnnouncements(multicastIP net.IP, port int) {
+	sdp := sdp.SessionDescription{
+		Version: 0,
+		Origin: sdp.Origin{
+			Username:       "-",
+			SessionID:      1234567890, // Unique session ID
+			SessionVersion: 1,          // Increment for each session
+			NetworkType:    "IN",
+			AddressType:    "IP4",
+			UnicastAddress: "10.1.2.115", // Replace with the actual IP address of the sender
+		},
+		SessionName: "WebRTC Audio",
+		ConnectionInformation: &sdp.ConnectionInformation{
+			NetworkType: "IN",
+			AddressType: "IP4",
+			Address:     &sdp.Address{Address: multicastIP.String()},
+		},
+		TimeDescriptions: []sdp.TimeDescription{
+			{
+				Timing: sdp.Timing{StartTime: 0, StopTime: 0},
+			},
+		},
+		MediaDescriptions: []*sdp.MediaDescription{
+			{
+				MediaName: sdp.MediaName{
+					Media:   "audio",
+					Port:    sdp.RangedPort{Value: port},
+					Protos:  []string{"RTP", "AVP"},
+					Formats: []string{"96"},
+				},
+				Attributes: []sdp.Attribute{
+					{Key: "rtpmap", Value: "96 L24/48000/2"}, // Corrected to stereo (2 channels)
+					{Key: "ptime", Value: "20"},              // Packet time in milliseconds
+					{Key: "ts-refclk", Value: "ptp=IEEE1588-2008:00-1D-C1-FF-FE-00-59-5D:0"},
+					{Key: "mediaclk", Value: "direct=0"},
+				},
+			},
+		},
+	}
+
+	sdpContent, err := sdp.Marshal()
+	if err != nil {
+		log.Fatal("Failed to marshal SDP:", err)
+	}
+
+	var packet bytes.Buffer
+
+	// Calculate the Message ID hash
+	hash := sha1.New()
+	hash.Write(sdpContent)
+	messageIDHash := hash.Sum(nil)
+
+	// SAP header
+	// SAP/SDP header according to RFC 2974
+	packet.WriteByte(0x20)                        // SAP header first byte
+	packet.WriteByte(0x00)                        // Authentication length
+	packet.Write(messageIDHash[:2])               // Message ID hash
+	packet.Write(net.ParseIP("10.1.2.115").To4()) // Source IP address (originating address)
+
+	// Add proper payload type header with leading 'a'
+	packet.WriteString("application/sdp") // No null termination needed
+
+	packet.WriteByte(0x00) // null termination
+
+	// Write SDP content
+	packet.Write(sdpContent)
+
+	sapAddr := &net.UDPAddr{
+		IP:   net.ParseIP("239.255.255.255"), // SAP multicast address
+		Port: 9875,                           // SAP port
+	}
+
+	conn, err := net.DialUDP("udp", nil, sapAddr)
+	if err != nil {
+		log.Fatal("Failed to create UDP connection for SAP:", err)
+	}
+	defer conn.Close()
+
+	for {
+		_, err := conn.Write(packet.Bytes())
+		if err != nil {
+			log.Error("Failed to send SAP packet:", err)
+		}
+		time.Sleep(15 * time.Second) // Send SAP announcements every 15 seconds
+	}
+}
+
+// Function to process and buffer audio packets
+func processAudioPacket(audioPayload []byte, encoder *opus.Encoder, audioTrack *webrtc.TrackLocalStaticSample) {
+	sampleSize := 3 // 24-bit audio
+
+	// Process the AES67 L24 audio payload
+	// Ensure the payload length is a multiple of the sample size
+	if len(audioPayload)%sampleSize != 0 {
+		fmt.Println("Invalid payload length for L24 audio")
+		return
+	}
+
+	numSamples := len(audioPayload) / sampleSize
+	pcm := make([]int16, numSamples)
+
+	// Convert the payload to 16-bit PCM samples
+	for i := 0; i < numSamples; i++ {
+		sample := int32(audioPayload[i*sampleSize]) << 16
+		sample |= int32(audioPayload[i*sampleSize+1]) << 8
+		sample |= int32(audioPayload[i*sampleSize+2])
+		// Sign extend the 24-bit sample to 32-bit
+		if sample&0x800000 != 0 {
+			sample |= ^0xFFFFFF
+		}
+		// Convert to 16-bit PCM
+		pcm[i] = int16(sample >> 8)
+	}
+
+	// Adjust the frame size
+	if len(pcm) > desiredFrameSize {
+		pcm = pcm[:desiredFrameSize]
+	} else if len(pcm) < desiredFrameSize {
+		// Pad the pcm slice with zeros if it's smaller than the desired frame size
+		pcm = append(pcm, make([]int16, desiredFrameSize-len(pcm))...)
+	}
+
+	data := make([]byte, desiredFrameSize*2) // buffer for the encoded data (2 bytes per sample)
+	n, err := encoder.Encode(pcm, data)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	data = data[:n] // only the first N bytes are opus data. Just like io.Reader.
+
+	// Add the encoded data to the buffer
+	bufferMutex.Lock()
+	audioBuffer = append(audioBuffer, data)
+	if len(audioBuffer) >= bufferThreshold {
+		// Write the buffered data to the audio track
+		for _, packet := range audioBuffer {
+			err = audioTrack.WriteSample(media.Sample{
+				Data: packet, 
+				Duration: time.Millisecond * 20
+			})
+			if err != nil {
+				fmt.Println("Error:", err)
+				break
+			}
+		}
+		// Clear the buffer
+		audioBuffer = audioBuffer[:0]
+	}
+	bufferMutex.Unlock()
 }
