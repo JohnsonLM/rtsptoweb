@@ -30,19 +30,27 @@
   },
   "streams": {
       "demo1": {
-        "name": "test video stream 1",
+        "name": "Game1",
         "channels": {
           "0": {
-            "name": "ch1",
-            "url": "rtsp://10.1.1.1:7447/z2oPZR8vvyJjyawM",
+            "name": "cam1",
+            "url": "rtsp://192.168.2.1:7447/S3GS2uKbaZMpbhYh",
             "on_demand": false,
             "debug": false,
             "audio": true,
             "status": 0
           },
           "1": {
-            "name": "ch1",
-            "url": "rtsp://10.1.1.1:7447/4YkzaM9NK6HmLrn9",
+            "name": "cam2",
+            "url": "rtsp://192.168.2.1:7447/PZcHVDdcV4cjYnvq",
+            "on_demand": false,
+            "debug": false,
+            "audio": true,
+            "status": 0
+          },
+          "2": {
+            "name": "cam3",
+            "url": "rtsp://192.168.2.1:7447/PptnqmlOLir2xGQY",
             "on_demand": false,
             "debug": false,
             "audio": true,

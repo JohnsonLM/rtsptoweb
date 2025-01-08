@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,20 +23,20 @@ import (
 )
 
 var (
-	decoder     *opus.Decoder
-	encoder     *opus.Encoder
-	err         error
-	audioBuffer [][]byte
-	bufferMutex sync.Mutex
+	err            error
+	decoder        *opus.Decoder
+	encoder        *opus.Encoder
+	multicastGroup = net.ParseIP("239.69.10.5")
+	multicastPort  = 5004
+	packetBuffer   [][]byte
+	pcmBuffer      []int16 // Define pcmBuffer globally
 )
 
 const (
-	sampleRate       = 48000
-	inputChannels    = 2
-	outputChannels   = 2
-	framesPerBuffer  = 960  // 20ms at 48kHz per channel
-	bufferThreshold  = 10   // Number of packets to buffer before writing to the audio track
-	desiredFrameSize = 1920 // Desired frame size in samples
+	sampleRate      = 48000
+	inputChannels   = 2
+	framesPerBuffer = 960 // 20ms at 48kHz per channel
+	frameSize       = 960 // Desired frame size in samples
 )
 
 // function to handle WebRTC audio stream
@@ -84,8 +83,8 @@ func handleWebRTCStream(c *gin.Context) {
 
 				// Create a UDP connection to the AES67 multicast group
 				conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
-					IP:   net.ParseIP("239.69.10.5"), // Replace with your multicast group IP
-					Port: 5004,                       // Replace with your multicast group port
+					IP:   multicastGroup,
+					Port: multicastPort,
 				})
 				if err != nil {
 					log.Fatal("Failed to create UDP connection:", err)
@@ -93,7 +92,7 @@ func handleWebRTCStream(c *gin.Context) {
 				defer conn.Close()
 
 				// Start sending SAP announcements
-				go sendSAPAnnouncements(net.ParseIP("239.69.10.5"), 5004)
+				go sendSAPAnnouncements(multicastGroup, multicastPort)
 
 				// Read RTP packets from the track and forward them to the multicast group
 				buf := make([]byte, 1500)
@@ -175,7 +174,7 @@ func handleWebRTCStream(c *gin.Context) {
 		}
 	}()
 
-	// Write audio data to the audio track from ES67 stream
+	// Write audio data to the audio track from AES67 stream
 	go func() {
 		multicastAddr := "239.69.10.42:5004"
 
@@ -202,19 +201,16 @@ func handleWebRTCStream(c *gin.Context) {
 		}
 
 		// Initialize the Opus encoder
-		encoder, err := opus.NewEncoder(sampleRate, outputChannels, opus.AppVoIP) // 48000 Hz sample rate, 2 channel (stereo)
+		encoder, err := opus.NewEncoder(sampleRate, 1, opus.AppVoIP) // 48000 Hz sample rate, 1 channel (mono)
 		if err != nil {
 			log.Fatalf("failed to create Opus encoder: %v", err)
 		}
-
-		// Initialize the buffer
-		audioBuffer = make([][]byte, 0, bufferThreshold)
 
 		// Read RTP packets from the multicast group
 		for {
 			buf := make([]byte, 1024)
 			const rtpHeaderSize = 12
-			n, src, err := conn.ReadFromUDP(buf)
+			n, _, err := conn.ReadFromUDP(buf)
 			if err != nil {
 				fmt.Println("Error reading from UDP:", err)
 				continue
@@ -226,22 +222,17 @@ func handleWebRTCStream(c *gin.Context) {
 				continue
 			}
 
-			// Extract RTP header fields
-			version := buf[0] >> 6
-			payloadType := buf[1] & 0x7F
-			sequenceNumber := binary.BigEndian.Uint16(buf[2:4])
-			timestamp := binary.BigEndian.Uint32(buf[4:8])
-			ssrc := binary.BigEndian.Uint32(buf[8:12])
-
-			fmt.Printf("Received RTP packet from %s\n", src)
-			fmt.Printf("Version: %d, Payload Type: %d, Sequence Number: %d, Timestamp: %d, SSRC: %d\n",
-				version, payloadType, sequenceNumber, timestamp, ssrc)
+			// Extract and print RTP header fields
+			// payloadType := buf[1] & 0x7F
+			// sequenceNumber := binary.BigEndian.Uint16(buf[2:4])
+			// timestamp := binary.BigEndian.Uint32(buf[4:8])
+			// fmt.Printf("Received RTP from %s, Payload Type: %d, Sequence Number: %d, Timestamp: %d\n", src, payloadType, sequenceNumber, timestamp)
 
 			// Extract the audio payload
 			audioPayload := buf[rtpHeaderSize:n]
 
 			// Process and buffer the audio packet
-			processAudioPacket(audioPayload, encoder, audioTrack)
+			bufferRTPPackets(audioPayload, encoder, audioTrack)
 		}
 	}()
 
@@ -324,9 +315,9 @@ func sendSAPAnnouncements(multicastIP net.IP, port int) {
 			SessionVersion: 1,          // Increment for each session
 			NetworkType:    "IN",
 			AddressType:    "IP4",
-			UnicastAddress: "10.1.2.115", // Replace with the actual IP address of the sender
+			UnicastAddress: GetOutboundIP().String(), // Replace with the actual IP address of the sender
 		},
-		SessionName: "WebRTC Audio",
+		SessionName: "Game-1-Client-Audio",
 		ConnectionInformation: &sdp.ConnectionInformation{
 			NetworkType: "IN",
 			AddressType: "IP4",
@@ -346,10 +337,10 @@ func sendSAPAnnouncements(multicastIP net.IP, port int) {
 					Formats: []string{"96"},
 				},
 				Attributes: []sdp.Attribute{
-					{Key: "rtpmap", Value: "96 L24/48000/2"}, // Corrected to stereo (2 channels)
-					{Key: "ptime", Value: "20"},              // Packet time in milliseconds
-					{Key: "ts-refclk", Value: "ptp=IEEE1588-2008:00-1D-C1-FF-FE-00-59-5D:0"},
-					{Key: "mediaclk", Value: "direct=0"},
+					{Key: "rtpmap", Value: "96 L24/48000/2"},                                   // Corrected to stereo (2 channels)
+					{Key: "ptime", Value: "20"},                                                // Packet time in milliseconds
+					{Key: "ts-refclk", Value: "ptp=IEEE1588-2008:00-1D-C1-FF-FE-00-59-5D:0if"}, // IEEE 1588-2008 PTP reference clock
+					{Key: "mediaclk", Value: "direct=0"},                                       // Direct media clock
 				},
 			},
 		},
@@ -369,10 +360,10 @@ func sendSAPAnnouncements(multicastIP net.IP, port int) {
 
 	// SAP header
 	// SAP/SDP header according to RFC 2974
-	packet.WriteByte(0x20)                        // SAP header first byte
-	packet.WriteByte(0x00)                        // Authentication length
-	packet.Write(messageIDHash[:2])               // Message ID hash
-	packet.Write(net.ParseIP("10.1.2.115").To4()) // Source IP address (originating address)
+	packet.WriteByte(0x20)                                    // SAP header first byte
+	packet.WriteByte(0x00)                                    // Authentication length
+	packet.Write(messageIDHash[:2])                           // Message ID hash
+	packet.Write(net.ParseIP(GetOutboundIP().String()).To4()) // Source IP address (originating address)
 
 	// Add proper payload type header with leading 'a'
 	packet.WriteString("application/sdp") // No null termination needed
@@ -402,25 +393,24 @@ func sendSAPAnnouncements(multicastIP net.IP, port int) {
 	}
 }
 
-// Function to process and buffer audio packets
-func processAudioPacket(audioPayload []byte, encoder *opus.Encoder, audioTrack *webrtc.TrackLocalStaticSample) {
+// Function to buffer RTP packets and call processAudioPacket after 5 packets
+func bufferRTPPackets(audioPayload []byte, encoder *opus.Encoder, audioTrack *webrtc.TrackLocalStaticSample) {
 	sampleSize := 3 // 24-bit audio
 
-	// Process the AES67 L24 audio payload
-	// Ensure the payload length is a multiple of the sample size
-	if len(audioPayload)%sampleSize != 0 {
-		fmt.Println("Invalid payload length for L24 audio")
+	// Ensure the payload length is a multiple of the sample size and number of channels
+	if len(audioPayload)%(sampleSize) != 0 {
+		fmt.Println("Invalid payload length for interleaved L24 audio")
 		return
 	}
 
-	numSamples := len(audioPayload) / sampleSize
-	pcm := make([]int16, numSamples)
+	numSamples := len(audioPayload) / (sampleSize) // Number of 24-bit samples
+	pcm := make([]int16, numSamples)               // Buffer for the 16-bit PCM samples
 
 	// Convert the payload to 16-bit PCM samples
 	for i := 0; i < numSamples; i++ {
-		sample := int32(audioPayload[i*sampleSize]) << 16
-		sample |= int32(audioPayload[i*sampleSize+1]) << 8
-		sample |= int32(audioPayload[i*sampleSize+2])
+		sample := int32(audioPayload[sampleSize]) << 16
+		sample |= int32(audioPayload[sampleSize+1]) << 8
+		sample |= int32(audioPayload[sampleSize+2])
 		// Sign extend the 24-bit sample to 32-bit
 		if sample&0x800000 != 0 {
 			sample |= ^0xFFFFFF
@@ -429,36 +419,42 @@ func processAudioPacket(audioPayload []byte, encoder *opus.Encoder, audioTrack *
 		pcm[i] = int16(sample >> 8)
 	}
 
-	// Adjust the frame size
-	if len(pcm) > desiredFrameSize {
-		pcm = pcm[:desiredFrameSize]
-	} else if len(pcm) < desiredFrameSize {
-		// Pad the pcm slice with zeros if it's smaller than the desired frame size
-		pcm = append(pcm, make([]int16, desiredFrameSize-len(pcm))...)
-	}
+	// Append the new PCM samples to the buffer
+	pcmBuffer = append(pcmBuffer, pcm...)
 
-	data := make([]byte, desiredFrameSize*2) // buffer for the encoded data (2 bytes per sample)
-	n, err := encoder.Encode(pcm, data)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
-	data = data[:n] // only the first N bytes are opus data. Just like io.Reader.
+	// when there are enough samples in the buffer, process them
+	if len(pcmBuffer) >= frameSize {
+		frame := pcmBuffer[:frameSize]    // Take the first frameSize samples for encoding
+		pcmBuffer = pcmBuffer[frameSize:] // Remove the used samples from the buffer
 
-	// Add the encoded data to the buffer
-	bufferMutex.Lock()
-	audioBuffer = append(audioBuffer, data)
-	if len(audioBuffer) >= bufferThreshold {
-		// Write the buffered data to the audio track
-		for _, packet := range audioBuffer {
-			err = audioTrack.WriteSample(media.Sample{Data: packet, Duration: time.Millisecond * 20})
-			if err != nil {
-				fmt.Println("Error:", err)
-				break
-			}
+		// Encode PCM to Opus
+		opusData := make([]byte, frameSize) // buffer for the encoded data
+		n, encodeErr := encoder.Encode(frame, opusData)
+		if encodeErr != nil {
+			log.Error("Failed to encode PCM to Opus:", encodeErr)
 		}
-		// Clear the buffer
-		audioBuffer = audioBuffer[:0]
+		opusData = opusData[:n] // only the first N bytes are opus data.
+
+		// Write Opus data to the WebRTC audio track
+		err = audioTrack.WriteSample(media.Sample{Data: opusData, Duration: time.Millisecond * 20})
+		if err != nil {
+			log.Error("Failed to write Opus data to audio track:", err)
+		} else {
+			log.Info("Wrote Opus data to audio track")
+		}
 	}
-	bufferMutex.Unlock()
+
+}
+
+// Get preferred outbound ip of this machine
+func GetOutboundIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	localAddr := conn.LocalAddr().(*net.UDPAddr)
+
+	return localAddr.IP
 }

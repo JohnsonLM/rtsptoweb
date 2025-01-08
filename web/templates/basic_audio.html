@@ -1,28 +1,72 @@
 <!DOCTYPE html>
 <html lang="en">
   <head>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/water.css@2/out/water.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta charset="utf-8" />
-    <title>RTSPtoWeb WebRTC Audio example</title>
-  </head>
+    <title>RTSP/AES67 to WebRTC</title>
+    <style>
+      .container {
+        display: grid;
+      }
+      body {
+        max-width: 1200px !important;
+      }
+    </style>
   <body>
-    <h1>RTSPtoWeb WebRTC Audio example</h1>
+    <h1>RTSP/AES67 to WebRTC</h1>
     <audio controls id="audio_track" autoplay></audio>
-    <video
-    width="800px"
-    id="webrtc-video-1"
-    autoplay
-    muted
-    playsinline
-    style="max-width: 100%; max-height: 100%"
-  ></video>
-  <video
-    width="800px"
-    id="webrtc-video-2"
-    autoplay
-    muted
-    playsinline
-    style="max-width: 100%; max-height: 100%"
-  ></video>
+    <hr>
+    <div class="video-container">
+      <video
+      width="49%"
+      id="webrtc-video-1"
+      autoplay
+      muted
+      playsinline
+      style="max-width: 100%; max-height: 100%"
+      ></video>
+      <video
+        width="49%"
+        id="webrtc-video-2"
+        autoplay
+        muted
+        playsinline
+        style="max-width: 100%; max-height: 100%"
+      ></video>
+      <video
+        width="49%"
+        id="webrtc-video-3"
+        autoplay
+        muted
+        playsinline
+        style="max-width: 100%; max-height: 100%"
+      ></video>
+      <video
+        width="49%"
+        id="webrtc-video-4"
+        autoplay
+        muted
+        playsinline
+        style="max-width: 100%; max-height: 100%"
+      ></video>
+      <video
+        width="49%"
+        id="webrtc-video-5"
+        autoplay
+        muted
+        playsinline
+        style="max-width: 100%; max-height: 100%"
+      ></video>
+      <video
+        width="49%"
+        id="webrtc-video-6"
+        autoplay
+        muted
+        playsinline
+        style="max-width: 100%; max-height: 100%"
+      ></video>
+    </div>
 
     <script>
       document.addEventListener("DOMContentLoaded", function () {
@@ -234,11 +278,27 @@
         );
         startPlay(
           document.querySelector("#webrtc-video-1"),
-          "http://localhost:8083/stream/demo1/channel/0/webrtc?uuid=demo1&channel=0?token=test"
+          "http://localhost:8083/stream/demo1/channel/0/webrtc?uuid=demo1&channel=0"
         );
         startPlay(
           document.querySelector("#webrtc-video-2"),
-          "http://localhost:8083/stream/demo1/channel/1/webrtc?uuid=demo1&channel=1?token=test"
+          "http://localhost:8083/stream/demo1/channel/1/webrtc?uuid=demo1&channel=1"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-3"),
+          "http://localhost:8083/stream/demo1/channel/2/webrtc?uuid=demo1&channel=2"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-4"),
+          "http://localhost:8083/stream/demo1/channel/0/webrtc?uuid=demo1&channel=0"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-5"),
+          "http://localhost:8083/stream/demo1/channel/1/webrtc?uuid=demo1&channel=1"
+        );
+        startPlay(
+          document.querySelector("#webrtc-video-6"),
+          "http://localhost:8083/stream/demo1/channel/2/webrtc?uuid=demo1&channel=2"
         );
       });
     </script>
