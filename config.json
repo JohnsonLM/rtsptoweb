@@ -55,6 +55,22 @@
             "debug": false,
             "audio": true,
             "status": 0
+          },
+          "3": {
+            "name": "cam4",
+            "url": "rtsp://admin:breakout35@192.168.2.102/cam/realmonitor?channel=4&subtype=0",
+            "on_demand": false,
+            "debug": false,
+            "audio": true,
+            "status": 0
+          },
+          "4": {
+            "name": "cam5",
+            "url": "rtsp://admin:breakout35@192.168.2.102/cam/realmonitor?channel=1&subtype=0",
+            "on_demand": false,
+            "debug": false,
+            "audio": true,
+            "status": 0
           }
         }
       }

@@ -58,14 +58,6 @@
         playsinline
         style="max-width: 100%; max-height: 100%"
       ></video>
-      <video
-        width="49%"
-        id="webrtc-video-6"
-        autoplay
-        muted
-        playsinline
-        style="max-width: 100%; max-height: 100%"
-      ></video>
     </div>
 
     <script>
@@ -290,15 +282,11 @@
         );
         startPlay(
           document.querySelector("#webrtc-video-4"),
-          "http://localhost:8083/stream/demo1/channel/0/webrtc?uuid=demo1&channel=0"
+          "http://localhost:8083/stream/demo1/channel/3/webrtc?uuid=demo1&channel=0"
         );
         startPlay(
           document.querySelector("#webrtc-video-5"),
-          "http://localhost:8083/stream/demo1/channel/1/webrtc?uuid=demo1&channel=1"
-        );
-        startPlay(
-          document.querySelector("#webrtc-video-6"),
-          "http://localhost:8083/stream/demo1/channel/2/webrtc?uuid=demo1&channel=2"
+          "http://localhost:8083/stream/demo1/channel/4/webrtc?uuid=demo1&channel=1"
         );
       });
     </script>

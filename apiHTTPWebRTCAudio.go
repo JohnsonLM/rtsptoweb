@@ -23,20 +23,21 @@ import (
 )
 
 var (
-	err            error
-	decoder        *opus.Decoder
-	encoder        *opus.Encoder
-	multicastGroup = net.ParseIP("239.69.10.5")
-	multicastPort  = 5004
-	packetBuffer   [][]byte
-	pcmBuffer      []int16 // Define pcmBuffer globally
+	err                   error
+	decoder               *opus.Decoder
+	encoder               *opus.Encoder
+	multicastGroup        = net.ParseIP("239.69.10.5")
+	multicastPort         = 5004
+	packetBuffer          [][]byte
+	pcmBuffer             []int16 // Define pcmBuffer globally
+	receiveMulticastGroup = "239.69.83.87:5004"
 )
 
 const (
 	sampleRate      = 48000
 	inputChannels   = 2
-	framesPerBuffer = 960 // 20ms at 48kHz per channel
-	frameSize       = 960 // Desired frame size in samples
+	framesPerBuffer = 960  // 20ms at 48kHz per channel
+	frameSize       = 1920 // Desired frame size in samples
 )
 
 // function to handle WebRTC audio stream
@@ -176,17 +177,22 @@ func handleWebRTCStream(c *gin.Context) {
 
 	// Write audio data to the audio track from AES67 stream
 	go func() {
-		multicastAddr := "239.69.10.42:5004"
-
 		// Resolve the UDP address
-		addr, err := net.ResolveUDPAddr("udp", multicastAddr)
+		addr, err := net.ResolveUDPAddr("udp", receiveMulticastGroup)
 		if err != nil {
 			fmt.Println("Error resolving address:", err)
 			os.Exit(1)
 		}
 
+		// Find the network interface by name
+		iface, err := net.InterfaceByName("en0")
+		if err != nil {
+			fmt.Println("Error finding interface:", err)
+			os.Exit(1)
+		}
+
 		// Create the UDP connection
-		conn, err := net.ListenMulticastUDP("udp", nil, addr)
+		conn, err := net.ListenMulticastUDP("udp", iface, addr)
 		if err != nil {
 			fmt.Println("Error creating connection:", err)
 			os.Exit(1)
@@ -194,7 +200,7 @@ func handleWebRTCStream(c *gin.Context) {
 		defer conn.Close()
 
 		// Set the read buffer size
-		err = conn.SetReadBuffer(1920)
+		err = conn.SetReadBuffer(240)
 		if err != nil {
 			fmt.Println("Error setting read buffer:", err)
 			os.Exit(1)
@@ -208,31 +214,8 @@ func handleWebRTCStream(c *gin.Context) {
 
 		// Read RTP packets from the multicast group
 		for {
-			buf := make([]byte, 1024)
-			const rtpHeaderSize = 12
-			n, _, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				fmt.Println("Error reading from UDP:", err)
-				continue
-			}
-
-			// Parse the RTP header
-			if n < rtpHeaderSize {
-				fmt.Println("Packet too short to be RTP")
-				continue
-			}
-
-			// Extract and print RTP header fields
-			// payloadType := buf[1] & 0x7F
-			// sequenceNumber := binary.BigEndian.Uint16(buf[2:4])
-			// timestamp := binary.BigEndian.Uint32(buf[4:8])
-			// fmt.Printf("Received RTP from %s, Payload Type: %d, Sequence Number: %d, Timestamp: %d\n", src, payloadType, sequenceNumber, timestamp)
-
-			// Extract the audio payload
-			audioPayload := buf[rtpHeaderSize:n]
-
 			// Process and buffer the audio packet
-			bufferRTPPackets(audioPayload, encoder, audioTrack)
+			bufferRTPPackets(conn, encoder, audioTrack)
 		}
 	}()
 
@@ -394,7 +377,16 @@ func sendSAPAnnouncements(multicastIP net.IP, port int) {
 }
 
 // Function to buffer RTP packets and call processAudioPacket after 5 packets
-func bufferRTPPackets(audioPayload []byte, encoder *opus.Encoder, audioTrack *webrtc.TrackLocalStaticSample) {
+func bufferRTPPackets(conn *net.UDPConn, encoder *opus.Encoder, audioTrack *webrtc.TrackLocalStaticSample) {
+	buf := make([]byte, 160)
+	const rtpHeaderSize = 12
+	n, _, err := conn.ReadFromUDP(buf)
+	if err != nil {
+		fmt.Println("Error reading from UDP:", err)
+	}
+
+	// Extract the audio payload
+	audioPayload := buf[rtpHeaderSize:n]
 	sampleSize := 3 // 24-bit audio
 
 	// Ensure the payload length is a multiple of the sample size and number of channels
@@ -408,9 +400,7 @@ func bufferRTPPackets(audioPayload []byte, encoder *opus.Encoder, audioTrack *we
 
 	// Convert the payload to 16-bit PCM samples
 	for i := 0; i < numSamples; i++ {
-		sample := int32(audioPayload[sampleSize]) << 16
-		sample |= int32(audioPayload[sampleSize+1]) << 8
-		sample |= int32(audioPayload[sampleSize+2])
+		sample := int32(audioPayload[i*sampleSize])<<16 | int32(audioPayload[i*sampleSize+1])<<8 | int32(audioPayload[i*sampleSize+2])
 		// Sign extend the 24-bit sample to 32-bit
 		if sample&0x800000 != 0 {
 			sample |= ^0xFFFFFF
@@ -436,11 +426,9 @@ func bufferRTPPackets(audioPayload []byte, encoder *opus.Encoder, audioTrack *we
 		opusData = opusData[:n] // only the first N bytes are opus data.
 
 		// Write Opus data to the WebRTC audio track
-		err = audioTrack.WriteSample(media.Sample{Data: opusData, Duration: time.Millisecond * 20})
+		err = audioTrack.WriteSample(media.Sample{Data: opusData, Duration: time.Millisecond * 40})
 		if err != nil {
 			log.Error("Failed to write Opus data to audio track:", err)
-		} else {
-			log.Info("Wrote Opus data to audio track")
 		}
 	}
 
